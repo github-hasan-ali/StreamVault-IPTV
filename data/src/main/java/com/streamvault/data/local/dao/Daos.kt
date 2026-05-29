@@ -753,11 +753,23 @@ interface TmdbIdentityDao {
     suspend fun pruneOrphanedSeriesIdentities()
 }
 
+/** Minimal parental-protection projection for resolving whether a recently-watched movie is locked. */
+data class VodProtectionRow(
+    val id: Long,
+    val isAdult: Boolean,
+    val isUserProtected: Boolean,
+    val categoryId: Long?
+)
+
 @Dao
 @RewriteQueriesToDropUnusedColumns
 interface MovieDao {
     @Query("SELECT * FROM movies WHERE provider_id = :providerId ORDER BY added_at DESC, name ASC, id ASC")
     fun getByProvider(providerId: Long): Flow<List<MovieBrowseEntity>>
+
+    /** Resolve parental-protection metadata for a set of movie ids (continue-watching PIN gate). */
+    @Query("SELECT id, is_adult AS isAdult, is_user_protected AS isUserProtected, category_id AS categoryId FROM movies WHERE id IN (:ids)")
+    suspend fun getVodProtectionByIds(ids: List<Long>): List<VodProtectionRow>
 
     /** SQL-level parental filter — avoids loading protected items into memory. */
     @Query("SELECT * FROM movies WHERE provider_id = :providerId AND is_user_protected = 0 ORDER BY added_at DESC, name ASC, id ASC")

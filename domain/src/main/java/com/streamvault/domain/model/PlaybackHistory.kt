@@ -15,7 +15,12 @@ data class PlaybackHistory(
     val watchedStatus: PlaybackWatchedStatus = PlaybackWatchedStatus.IN_PROGRESS,
     val seriesId: Long? = null,
     val seasonNumber: Int? = null,
-    val episodeNumber: Int? = null
+    val episodeNumber: Int? = null,
+    // Parental-control metadata, populated for recently-watched / continue-watching lists so the
+    // resume shortcut can enforce the same PIN gate as opening the item from its locked category.
+    // Defaults keep every other producer unchanged.
+    val isProtected: Boolean = false,
+    val categoryId: Long? = null
 ) {
     init {
         require(resumePositionMs >= 0) { "resumePositionMs must be non-negative" }

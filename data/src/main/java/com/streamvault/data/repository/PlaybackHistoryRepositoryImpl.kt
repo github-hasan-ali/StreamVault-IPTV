@@ -57,14 +57,14 @@ class PlaybackHistoryRepositoryImpl @Inject constructor(
 
     override fun getRecentlyWatched(limit: Int): Flow<List<PlaybackHistory>> {
         return mergedRecentHistory(
-            persisted = dao.getRecentlyWatched(limit).map { list -> list.map { it.toDomain() } },
+            persisted = dao.getRecentlyWatched(limit).map { list -> enrichWithProtection(list.map { it.toDomain() }) },
             limit = limit
         ) { true }
     }
 
     override fun getRecentlyWatchedByProvider(providerId: Long, limit: Int): Flow<List<PlaybackHistory>> {
         return mergedRecentHistory(
-            persisted = dao.getRecentlyWatchedByProvider(providerId, limit).map { list -> list.map { it.toDomain() } },
+            persisted = dao.getRecentlyWatchedByProvider(providerId, limit).map { list -> enrichWithProtection(list.map { it.toDomain() }) },
             limit = limit
         ) { history -> history.providerId == providerId }
     }
@@ -74,9 +74,36 @@ class PlaybackHistoryRepositoryImpl @Inject constructor(
             return kotlinx.coroutines.flow.flowOf(emptyList())
         }
         return mergedRecentHistory(
-            persisted = dao.getRecentlyWatchedByProviders(providerIds, limit).map { list -> list.map { it.toDomain() } },
+            persisted = dao.getRecentlyWatchedByProviders(providerIds, limit).map { list -> enrichWithProtection(list.map { it.toDomain() }) },
             limit = limit
         ) { history -> history.providerId in providerIds }
+    }
+
+    /**
+     * Populate parental-protection metadata on MOVIE entries so the continue-watching UI can gate
+     * locked movies behind the PIN dialog (mirroring opening them from a locked category). Misses
+     * or query failures leave [PlaybackHistory.isProtected] false — i.e. no worse than before.
+     */
+    private suspend fun enrichWithProtection(histories: List<PlaybackHistory>): List<PlaybackHistory> {
+        val movieIds = histories.asSequence()
+            .filter { it.contentType == ContentType.MOVIE }
+            .map { it.contentId }
+            .distinct()
+            .toList()
+        if (movieIds.isEmpty()) return histories
+        val protectionById = runCatching { movieDao.getVodProtectionByIds(movieIds) }
+            .getOrNull()
+            .orEmpty()
+            .associateBy { it.id }
+        if (protectionById.isEmpty()) return histories
+        return histories.map { history ->
+            if (history.contentType != ContentType.MOVIE) return@map history
+            val protection = protectionById[history.contentId] ?: return@map history
+            history.copy(
+                isProtected = protection.isAdult || protection.isUserProtected,
+                categoryId = protection.categoryId
+            )
+        }
     }
 
     override fun getUnwatchedCount(providerId: Long, seriesId: Long): Flow<Int> {

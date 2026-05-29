@@ -35,6 +35,13 @@ Branch: `fix/episode-loss-403-and-tr-localization`
   `flatMapLatest` with no debounce, so each inserted batch cancel-restarted the in-flight
   query. It now reloads on catalog growth via a debounced (500 ms) trigger after an
   immediate first load.
+- **Resume of a PIN-locked movie bypassed the parental PIN (Movies screen).** Opening a
+  movie from a locked category prompts for the PIN, but resuming it from "Continue Watching"
+  played it straight away. `PlaybackHistory` now carries parental metadata (`isProtected`,
+  `categoryId`), populated for recently-watched lists via `MovieDao.getVodProtectionByIds`
+  in `PlaybackHistoryRepositoryImpl.enrichWithProtection`; the Movies "Continue Watching"
+  click now routes a locked movie through the existing `ProtectedVodPinDialog` instead of
+  playing. (Partial — see backlog for the remaining surfaces.)
 
 ### Changed
 
@@ -103,3 +110,25 @@ Proposed approach (low→medium risk, keep focus navigation intact):
 4. Surface the position/preview indicator on D-pad seeks too (time-only for HLS/DASH/live).
 
 Items 1–3 would resolve most of the friction.
+
+### Continue Watching / Recently-Watched parental gaps — remaining work (2026-05-30)
+
+The Movies "Continue Watching" PIN bypass is fixed (see above). The same class of gap
+remains on other surfaces; the data foundation (`PlaybackHistory.isProtected` /
+`categoryId` + `enrichWithProtection`) is already in place to close them:
+
+- **Bug #1 (resume bypasses PIN) — remaining surfaces.** Home/Dashboard
+  (`onPlaybackHistoryClick` → `navigateToPlayer`, `AppNavigation.kt:399-443`) and Favorites
+  (`onHistoryClick`) still play a locked movie without a PIN, and the dashboard
+  `SERIES_EPISODE` branch plays episodes straight to the player. These screens currently
+  have **no** parental-PIN UI, so closing them means mirroring the Movies wiring: collect
+  `unlockedCategoryIds` (via `parentalControlManager.unlockedCategoriesForProvider`) + add
+  `verifyPin` to their ViewModels, add `ProtectedVodPinDialog`, and gate the click. Episodes
+  also need protection plumbed from their **series** row (the current enrichment covers
+  MOVIE only). Deferred so the Movies gate can be validated on-device first.
+- **Bug #2 (locked content visible in the Continue Watching list).** At PRIVATE/HIDDEN
+  levels the continue-watching list should exclude protected items the way Search / EPG /
+  Recent-channels do (`AdultContentVisibilityPolicy.filterForAggregatedSurface`), but
+  `GetContinueWatching` applies no protection filter. With `isProtected` now on
+  `PlaybackHistory`, this is a one-place filter in the use case (or per-consumer). Not yet
+  done.

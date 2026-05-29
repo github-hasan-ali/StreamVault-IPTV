@@ -111,6 +111,7 @@ fun MoviesScreen(
     var pinError by remember { mutableStateOf<String?>(null) }
     var pendingMovie by remember { mutableStateOf<Movie?>(null) }
     var pendingCategory by remember { mutableStateOf<Category?>(null) }
+    var pendingContinue by remember { mutableStateOf<PlaybackHistory?>(null) }
     val context = androidx.compose.ui.platform.LocalContext.current
 
     HandleVodUserMessage(
@@ -132,14 +133,17 @@ fun MoviesScreen(
             pinError = null
             pendingMovie = null
             pendingCategory = null
+            pendingContinue = null
         },
         onVerified = {
             showPinDialog = false
             pinError = null
             pendingMovie?.let(onMovieClick)
             pendingCategory?.let(viewModel::unlockCategory)
+            pendingContinue?.let(onContinueWatchingPlay)
             pendingMovie = null
             pendingCategory = null
+            pendingContinue = null
         },
         onErrorChange = { pinError = it },
         verifyPin = viewModel::verifyPin
@@ -222,7 +226,23 @@ fun MoviesScreen(
                 searchQuery = uiState.searchQuery,
                 onSearchQueryChange = viewModel::setSearchQuery,
                 onMovieClick = onMovieClick,
-                onContinueWatchingPlay = onContinueWatchingPlay,
+                onContinueWatchingPlay = { history ->
+                    // A locked movie resumed from "Continue Watching" must pass the same PIN gate
+                    // as opening it from its locked category (instead of playing straight away).
+                    val categoryId = history.categoryId
+                    val locked = history.isProtected &&
+                        uiState.parentalControlLevel in 1..2 &&
+                        (categoryId == null ||
+                            kotlin.math.abs(categoryId) !in uiState.unlockedCategoryIds)
+                    if (locked) {
+                        pendingMovie = null
+                        pendingCategory = null
+                        pendingContinue = history
+                        showPinDialog = true
+                    } else {
+                        onContinueWatchingPlay(history)
+                    }
+                },
                 onProtectedMovieClick = { movie ->
                     pendingCategory = null
                     pendingMovie = movie
