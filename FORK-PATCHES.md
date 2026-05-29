@@ -65,3 +65,41 @@ Branch: `fix/episode-loss-403-and-tr-localization`
 - A separate local-only commit pins `buildToolsVersion = "36.1.0"` in the app/data/player
   modules because this machine lacks build-tools 35 and cmdline-tools. **That commit is
   environment-only and should be dropped before opening a PR upstream.**
+
+## Backlog / ideas (not implemented yet)
+
+### Player seek / fast-forward UX — deferred (raised 2026-05-30)
+
+Fast-forwarding VOD feels cumbersome on the TV remote. Investigated; intentionally
+**not changed yet** (needs on-device testing, no emulator available here).
+
+Current behavior (evidence):
+- Seek is a fixed **10 s** step only; no larger/variable jump. `PlayerEngine.seekForward/
+  seekBackward(ms = 10_000)` (`player/.../PlayerEngine.kt:71-72`), ViewModel wrappers call
+  it with no argument (`app/.../player/PlayerPlaybackControlActions.kt:12-20`), ExoPlayer
+  `setSeek*IncrementMs(10_000)` (`Media3PlayerEngine.kt:1003-1004`).
+- D-pad Left/Right only seek while the controls overlay is **hidden**; once controls are
+  visible they `return false` and fall through to focus navigation
+  (`PlayerScreen.kt:724` and `:743`) — so the "press right to skip ahead" gesture gets
+  interrupted. This is the most likely cause of the "cumbersome" feel.
+- Hold-to-repeat exists only on the on-screen ⏪/⏩ buttons and fires fixed 10 s steps with
+  no acceleration (`PlayerControlsChrome.kt:1455-1506`); the direct D-pad path has no
+  key-repeat at all (`PlayerScreen.kt:720-752`).
+- The VOD slider has no D-pad seek step, while the **live** timeshift scrubber does
+  (`PlayerControlsChrome.kt:1820-1832`).
+- Each press is an immediate `seekTo` with no debounce / scrubbing mode, so rapid presses
+  re-buffer on slow streams (`Media3PlayerEngine.kt:415-453`).
+- Seek thumbnail/time preview only appears while dragging the slider, not on ±10 s / D-pad
+  seeks (`PlayerControlsChrome.kt:1267`).
+
+Proposed approach (low→medium risk, keep focus navigation intact):
+1. Accelerating/growing increment (10 s → 30 s → 60 s) and/or long-press continuous seek on
+   the direct D-pad path (controls hidden).
+2. Debounce rapid presses into a single `seekTo` and enable scrubbing mode during a burst so
+   it doesn't re-buffer per press.
+3. Give the VOD slider the same direct-key ±10/±30 s seeking the live scrubber already has,
+   and focus the slider when controls open — so Left/Right seeks without breaking transport-
+   button navigation.
+4. Surface the position/preview indicator on D-pad seeks too (time-only for HLS/DASH/live).
+
+Items 1–3 would resolve most of the friction.
