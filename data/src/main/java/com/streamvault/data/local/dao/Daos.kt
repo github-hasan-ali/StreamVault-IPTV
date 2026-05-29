@@ -2442,6 +2442,26 @@ interface SeriesDao {
     @Update
     suspend fun updateAll(series: List<SeriesEntity>)
 
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertNew(series: List<SeriesEntity>)
+
+    /**
+     * Episode-preserving upsert. [insertAll] uses [OnConflictStrategy.REPLACE], which
+     * resolves a primary-key conflict with DELETE + INSERT. The DELETE phase fires the
+     * episodes table's ON DELETE CASCADE foreign key, wiping every persisted episode of
+     * the series (episodes are only re-fetched on detail hydration, so they stay gone).
+     * Routing already-persisted rows through [updateAll] updates them in place without a
+     * delete, so child episodes survive a catalog re-sync. New rows (id == 0) are inserted
+     * with IGNORE so a concurrent insert cannot trigger a destructive replace either.
+     */
+    @Transaction
+    suspend fun upsertPreservingEpisodes(series: List<SeriesEntity>) {
+        if (series.isEmpty()) return
+        val (existing, fresh) = series.partition { it.id > 0 }
+        if (existing.isNotEmpty()) updateAll(existing)
+        if (fresh.isNotEmpty()) insertNew(fresh)
+    }
+
     @Query(
         """
         SELECT id, COALESCE(NULLIF(provider_series_id, ''), CAST(series_id AS TEXT)) AS remote_id
@@ -2501,7 +2521,7 @@ interface SeriesDao {
         if (remapped.isEmpty()) {
             deleteByProviderAndCategory(providerId, categoryId)
         } else {
-            insertAll(remapped)
+            upsertPreservingEpisodes(remapped)
             deleteMissingByCategory(providerId, categoryId, remapped.map { it.remoteKey() })
         }
     }
@@ -2514,7 +2534,7 @@ interface SeriesDao {
         val remapped = series
             .distinctBy { it.remoteKey() }
             .map { entity -> entity.copy(id = existingByRemoteId[entity.remoteKey()] ?: 0L) }
-        insertAll(remapped)
+        upsertPreservingEpisodes(remapped)
     }
 
     @Query("SELECT category_id, COUNT(*) as item_count FROM series WHERE provider_id = :providerId AND category_id IS NOT NULL GROUP BY category_id")

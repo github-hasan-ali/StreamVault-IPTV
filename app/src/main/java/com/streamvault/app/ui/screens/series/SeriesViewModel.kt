@@ -55,11 +55,14 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.distinctUntilChangedBy
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.mapLatest
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -87,6 +90,12 @@ class SeriesViewModel @Inject constructor(
         const val MIN_SEARCH_QUERY_LENGTH = 2
         const val FAVORITE_ID_FETCH_BUFFER = 80
         const val INITIAL_PREVIEW_BATCH_SIZE = 6
+
+        // Debounce window for catalog-driven reloads of the selected category. A bulk
+        // background hydration writes many row batches; without this, getLibraryCount would
+        // re-emit on every batch and flatMapLatest would cancel/restart the in-flight query
+        // repeatedly (a reload storm). One trailing reload after the writes settle is enough.
+        const val CATALOG_REFRESH_DEBOUNCE_MS = 500L
     }
 
     private val _uiState = MutableStateFlow(SeriesUiState())
@@ -361,9 +370,17 @@ class SeriesViewModel @Inject constructor(
                     }
                 }
                 .flatMapLatest { request ->
-                    flow {
-                        emit(loadSelectedCategoryItems(request))
-                    }
+                    // Load immediately for the current selection, then reload whenever the
+                    // catalog gains rows so a category still empty while its on-demand fetch was
+                    // running fills in automatically. The catalog signal is debounced and its
+                    // first (baseline) value dropped, so bulk hydration can't trigger a reload
+                    // storm that cancels and restarts the in-flight query on every row batch.
+                    seriesRepository.getLibraryCount(request.providerId)
+                        .distinctUntilChanged()
+                        .drop(1)
+                        .debounce(CATALOG_REFRESH_DEBOUNCE_MS)
+                        .onStart { emit(0) }
+                        .mapLatest { loadSelectedCategoryItems(request) }
                 }
                 .collect { snapshot ->
                     _uiState.update {

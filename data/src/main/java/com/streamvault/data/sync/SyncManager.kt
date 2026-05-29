@@ -112,6 +112,8 @@ private const val XTREAM_RECOVERY_ABORT_WARNING_SUFFIX =
 private const val XTREAM_AVOID_FULL_CATALOG_COOLDOWN_MILLIS = 6 * 60 * 60 * 1000L
 private const val XTREAM_MOVIE_REQUEST_TIMEOUT_MILLIS = 60_000L
 private const val XTREAM_SERIES_REQUEST_TIMEOUT_MILLIS = 60_000L
+// How soon a playback-deferred EPG sync re-checks whether playback has stopped.
+private const val EPG_PLAYBACK_DEFERRAL_RECHECK_SECONDS = 120L
 private const val XTREAM_SQLITE_LOOKUP_CHUNK_SIZE = 900
 private const val STALKER_GUIDE_PROGRAM_BATCH_SIZE = 500
 private const val XTREAM_ONBOARDING_PHASE_STARTING = "STARTING"
@@ -407,13 +409,21 @@ class SyncManager @Inject constructor(
         }
     }
 
-    fun scheduleXtreamIndexSync(providerId: Long, section: ContentType? = null, force: Boolean = false) {
+    fun scheduleXtreamIndexSync(
+        providerId: Long,
+        section: ContentType? = null,
+        force: Boolean = false,
+        initialDelaySeconds: Long = 0L,
+        userInitiated: Boolean = false
+    ) {
         runCatching {
             XtreamIndexWorker.enqueue(
                 context = applicationContext,
                 providerId = providerId,
                 section = section?.name,
-                force = force
+                force = force,
+                initialDelaySeconds = initialDelaySeconds,
+                userInitiated = userInitiated
             )
         }.onFailure { error ->
             Log.w(TAG, "Failed to schedule Xtream index work for provider $providerId (${section?.name ?: "all"}): ${sanitizeThrowableMessage(error)}")
@@ -449,6 +459,20 @@ class SyncManager @Inject constructor(
         scheduleStalkerIndexSync(providerId = providerId)
     }
 
+    // Xtream panels enforce a low max-simultaneous-connections limit (often 1), so the
+    // background catalog index worker must yield its connection slot while a stream is
+    // playing — otherwise the provider rejects the extra request with HTTP 403 and the
+    // active playback dies. We reuse the shared per-provider playback counter that already
+    // backs Stalker deferral; only the resume scheduling differs by provider type.
+    fun noteXtreamPlaybackStarted(providerId: Long) {
+        StalkerTrafficCoordinator.notePlaybackStarted(providerId)
+    }
+
+    fun noteXtreamPlaybackStopped(providerId: Long) {
+        StalkerTrafficCoordinator.notePlaybackStopped(providerId)
+        scheduleXtreamIndexSync(providerId = providerId)
+    }
+
     suspend fun prioritizeXtreamIndexCategory(
         providerId: Long,
         section: ContentType,
@@ -472,7 +496,9 @@ class SyncManager @Inject constructor(
                 priorityRequestedAt = now
             )
         }
-        scheduleXtreamIndexSync(providerId, section, force = false)
+        // User opened this category and is waiting for it — let it load even during playback
+        // (a single light category fetch), unlike the heavy periodic catalog sync which we defer.
+        scheduleXtreamIndexSync(providerId, section, force = false, userInitiated = true)
     }
 
     suspend fun prioritizeStalkerIndexCategory(
@@ -536,6 +562,26 @@ class SyncManager @Inject constructor(
             .copy(password = credentialCrypto.decryptIfNeeded(providerEntity.password))
             .toDomain()
         val providerId = provider.id
+
+        // Like the catalog sync, a background EPG refresh must not steal the provider's connection
+        // slot while a stream is playing (it would 403 live playback). A forced/user-initiated EPG
+        // refresh still runs. The deferred job re-checks shortly and proceeds once playback stops.
+        if (!force && StalkerTrafficCoordinator.deferCatalogFetchMillis(providerId) > 0L) {
+            Log.i(TAG, "Deferring EPG sync for provider $providerId because playback is active.")
+            updateXtreamEpgJobState(
+                provider = provider,
+                state = "QUEUED",
+                now = System.currentTimeMillis(),
+                lastError = null
+            )
+            BackgroundEpgSyncWorker.enqueue(
+                applicationContext,
+                providerId,
+                force = false,
+                initialDelaySeconds = EPG_PLAYBACK_DEFERRAL_RECHECK_SECONDS
+            )
+            return com.streamvault.domain.model.Result.success(Unit)
+        }
 
         if (!force && provider.type == ProviderType.STALKER_PORTAL && hasPendingStalkerCatalogIndex(provider.id)) {
             updateXtreamEpgJobState(
@@ -1453,11 +1499,28 @@ class SyncManager @Inject constructor(
         section: ContentType? = null,
         force: Boolean = false,
         maxCategoriesPerSection: Int? = null,
-        onProgress: ((String) -> Unit)? = null
+        onProgress: ((String) -> Unit)? = null,
+        userInitiated: Boolean = false
     ): com.streamvault.domain.model.Result<Unit> = withProviderLock(providerId) lock@{
         val providerEntity = providerDao.getById(providerId)
             ?: return@lock com.streamvault.domain.model.Result.error("Provider $providerId not found")
         if (providerEntity.type != ProviderType.XTREAM_CODES) {
+            return@lock com.streamvault.domain.model.Result.success(Unit)
+        }
+
+        // Yield the provider's (often single) connection slot to active playback: a background
+        // catalog sync would race the stream for that slot and trip a provider-side 403. A
+        // user-initiated browse (userInitiated) is a single light category fetch the user is
+        // actively waiting for, so it is allowed through even during playback.
+        val playbackDelayMillis = if (userInitiated) 0L else StalkerTrafficCoordinator.deferCatalogFetchMillis(providerId)
+        if (playbackDelayMillis > 0L) {
+            Log.i(TAG, "Deferring Xtream catalog work for provider $providerId because playback is active.")
+            scheduleXtreamIndexSync(
+                providerId = providerId,
+                section = section,
+                force = force,
+                initialDelaySeconds = ((playbackDelayMillis + 999L) / 1000L).coerceAtLeast(1L)
+            )
             return@lock com.streamvault.domain.model.Result.success(Unit)
         }
 
@@ -3406,7 +3469,9 @@ class SyncManager @Inject constructor(
         restoreWatchProgress: Boolean = true
     ): Int {
         if (movies.isEmpty()) return 0
-        val incoming = movies.map { movie -> movie.toEntity().copy(cacheState = "SUMMARY_ONLY", detailHydratedAt = 0L, remoteStaleAt = 0L) }
+        val incoming = movies
+            .map { movie -> movie.toEntity().copy(cacheState = "SUMMARY_ONLY", detailHydratedAt = 0L, remoteStaleAt = 0L) }
+            .distinctBy { it.streamId }
         val existingByStreamId = loadMoviesByStreamIds(providerId, incoming.map { it.streamId })
         val merged = incoming.map { summary ->
             val existing = existingByStreamId[summary.streamId]
@@ -3434,14 +3499,19 @@ class SyncManager @Inject constructor(
         indexedAt: Long
     ): Int {
         if (series.isEmpty()) return 0
-        val incoming = series.map { item -> item.toEntity().copy(cacheState = "SUMMARY_ONLY", detailHydratedAt = 0L, remoteStaleAt = 0L) }
+        // De-dupe by remote series id: with upsertPreservingEpisodes routing new rows through an
+        // IGNORE insert (which never conflicts on the autogenerated PK), two summaries for the same
+        // series in one batch would otherwise create duplicate series rows.
+        val incoming = series
+            .map { item -> item.toEntity().copy(cacheState = "SUMMARY_ONLY", detailHydratedAt = 0L, remoteStaleAt = 0L) }
+            .distinctBy { it.seriesId }
         val existingBySeriesId = loadSeriesByIds(providerId, incoming.map { it.seriesId })
         val merged = incoming.map { summary ->
             val existing = existingBySeriesId[summary.seriesId]
             mergeSeriesSummary(existing, summary)
         }
         transactionRunner.inTransaction {
-            seriesDao.insertAll(merged)
+            seriesDao.upsertPreservingEpisodes(merged)
             val persistedBySeriesId = loadSeriesByIds(providerId, merged.map { it.seriesId })
             xtreamContentIndexDao.upsertAll(
                 merged.map { item ->

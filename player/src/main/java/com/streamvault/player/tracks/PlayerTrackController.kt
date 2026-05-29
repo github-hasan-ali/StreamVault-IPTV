@@ -34,11 +34,27 @@ class PlayerTrackController(
     private var preferredWifiMaxVideoHeight: Int? = null
     private var preferredEthernetMaxVideoHeight: Int? = null
 
-    fun resetSelections() {
+    // The audio/subtitle the user explicitly picked during this playback session. After a
+    // re-prepare (e.g. a buffering retry) all track overrides are cleared, so we restore the
+    // pick two ways: the exact track id (precise, also works for tracks with no language) is
+    // re-applied once tracks reload in onTracksChanged; the language tag is a hint applied in
+    // applyInitialParameters so the first frame after re-prepare is already close to the choice.
+    private var userSelectedAudioLanguageTag: String? = null
+    private var userSelectedTextLanguageTag: String? = null
+    private var userSelectedAudioTrackId: String? = null
+    private var userSelectedSubtitleTrackId: String? = null
+
+    fun resetSelections(preserveUserSelections: Boolean = false) {
         _availableAudioTracks.value = emptyList()
         _availableSubtitleTracks.value = emptyList()
         _availableVideoTracks.value = emptyList()
-        selectedVideoTrackId = PLAYER_TRACK_AUTO_ID
+        if (!preserveUserSelections) {
+            selectedVideoTrackId = PLAYER_TRACK_AUTO_ID
+            userSelectedAudioLanguageTag = null
+            userSelectedTextLanguageTag = null
+            userSelectedAudioTrackId = null
+            userSelectedSubtitleTrackId = null
+        }
     }
 
     fun applyInitialParameters(player: ExoPlayer, constrainResolutionForMultiView: Boolean) {
@@ -48,9 +64,12 @@ class PlayerTrackController(
             .clearOverridesOfType(C.TRACK_TYPE_TEXT)
             .clearOverridesOfType(C.TRACK_TYPE_VIDEO)
             .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
-            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+            // Keep subtitles on only if the user had picked one this session (restored below).
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, userSelectedTextLanguageTag == null)
             .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, false)
-            .setPreferredAudioLanguage(preferredAudioLanguageTag)
+            // A session selection wins over the global preferred-audio setting; both survive retries.
+            .setPreferredAudioLanguage(userSelectedAudioLanguageTag ?: preferredAudioLanguageTag)
+            .setPreferredTextLanguage(userSelectedTextLanguageTag)
             .setViewportSizeToPhysicalDisplaySize(context, true)
             .apply {
                 resolvedMaxVideoHeightForCurrentNetwork(constrainResolutionForMultiView)?.let { maxHeight ->
@@ -74,7 +93,7 @@ class PlayerTrackController(
         preferredEthernetMaxVideoHeight = ethernetMaxHeight?.takeIf { it > 0 }
     }
 
-    fun onTracksChanged(tracks: Tracks) {
+    fun onTracksChanged(player: ExoPlayer?, tracks: Tracks) {
         val audioTracks = mutableListOf<PlayerTrack>()
         val subtitleTracks = mutableListOf<PlayerTrack>()
         val videoTracks = mutableListOf<PlayerTrack>()
@@ -114,6 +133,13 @@ class PlayerTrackController(
             availableTrackIds = videoTracks.map(PlayerTrack::id)
         )
 
+        // Re-apply the user's explicit audio/subtitle pick if a re-prepare (retry) dropped the
+        // override. Applying it triggers another onTracksChanged where the track reads as selected,
+        // so the guard (!isSelected) prevents any loop.
+        if (player != null) {
+            restoreUserTrackSelections(player, tracks, audioTracks, subtitleTracks)
+        }
+
         _availableAudioTracks.value = audioTracks
         _availableSubtitleTracks.value = subtitleTracks
         _availableVideoTracks.value = when {
@@ -133,6 +159,8 @@ class PlayerTrackController(
 
     fun selectAudioTrack(player: ExoPlayer, trackId: String) {
         val override = findOverride(player.currentTracks, C.TRACK_TYPE_AUDIO, trackId) ?: return
+        userSelectedAudioTrackId = trackId
+        userSelectedAudioLanguageTag = languageForTrack(player.currentTracks, C.TRACK_TYPE_AUDIO, trackId)
         player.trackSelectionParameters = player.trackSelectionParameters
             .buildUpon()
             .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
@@ -166,6 +194,8 @@ class PlayerTrackController(
 
     fun selectSubtitleTrack(player: ExoPlayer, trackId: String?) {
         if (trackId == null) {
+            userSelectedSubtitleTrackId = null
+            userSelectedTextLanguageTag = null
             player.trackSelectionParameters = player.trackSelectionParameters
                 .buildUpon()
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
@@ -174,11 +204,59 @@ class PlayerTrackController(
             return
         }
         val override = findOverride(player.currentTracks, C.TRACK_TYPE_TEXT, trackId) ?: return
+        userSelectedSubtitleTrackId = trackId
+        userSelectedTextLanguageTag = languageForTrack(player.currentTracks, C.TRACK_TYPE_TEXT, trackId)
         player.trackSelectionParameters = player.trackSelectionParameters
             .buildUpon()
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
             .setOverrideForType(override)
             .build()
+    }
+
+    private fun restoreUserTrackSelections(
+        player: ExoPlayer,
+        tracks: Tracks,
+        audioTracks: List<PlayerTrack>,
+        subtitleTracks: List<PlayerTrack>
+    ) {
+        userSelectedAudioTrackId?.let { id ->
+            val track = audioTracks.firstOrNull { it.id == id }
+            if (track != null && !track.isSelected) {
+                findOverride(tracks, C.TRACK_TYPE_AUDIO, id)?.let { override ->
+                    player.trackSelectionParameters = player.trackSelectionParameters
+                        .buildUpon()
+                        .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+                        .setOverrideForType(override)
+                        .build()
+                }
+            }
+        }
+        userSelectedSubtitleTrackId?.let { id ->
+            val track = subtitleTracks.firstOrNull { it.id == id }
+            if (track != null && !track.isSelected) {
+                findOverride(tracks, C.TRACK_TYPE_TEXT, id)?.let { override ->
+                    player.trackSelectionParameters = player.trackSelectionParameters
+                        .buildUpon()
+                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                        .setOverrideForType(override)
+                        .build()
+                }
+            }
+        }
+    }
+
+    private fun languageForTrack(tracks: Tracks, trackType: Int, trackId: String): String? {
+        for (group in tracks.groups) {
+            if (group.mediaTrackGroup.type != trackType) continue
+            for (index in 0 until group.length) {
+                val format = group.mediaTrackGroup.getFormat(index)
+                val id = format.id ?: "${group.mediaTrackGroup.hashCode()}_$index"
+                if (id == trackId) {
+                    return format.language?.takeIf { it.isNotBlank() && it != C.LANGUAGE_UNDETERMINED }
+                }
+            }
+        }
+        return null
     }
 
     private fun findOverride(tracks: Tracks, trackType: Int, trackId: String): TrackSelectionOverride? {

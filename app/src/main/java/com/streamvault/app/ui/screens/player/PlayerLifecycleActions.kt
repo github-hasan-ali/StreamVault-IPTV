@@ -118,7 +118,13 @@ internal fun PlayerViewModel.stopActiveStalkerPlaybackFetchDeferral() {
     val providerId = activeStalkerPlaybackProviderId ?: return
     activeStalkerPlaybackProviderId = null
     viewModelScope.launch {
-        syncManager.noteStalkerPlaybackStopped(providerId)
+        // Decrement the shared playback counter and resume the catalog worker that matches
+        // this provider's type (Xtream and Stalker share the deferral mechanism).
+        if (providerRepository.getProvider(providerId)?.type == ProviderType.XTREAM_CODES) {
+            syncManager.noteXtreamPlaybackStopped(providerId)
+        } else {
+            syncManager.noteStalkerPlaybackStopped(providerId)
+        }
     }
 }
 
@@ -132,8 +138,10 @@ internal suspend fun PlayerViewModel.synchronizeStalkerPlaybackFetchDeferral(isP
         stopActiveStalkerPlaybackFetchDeferral()
         return
     }
-    val provider = providerRepository.getProvider(providerId)
-    if (provider?.type != ProviderType.STALKER_PORTAL) {
+    // Both Xtream and Stalker enforce tight connection limits, so background catalog fetches
+    // must be deferred for either provider type while a stream is playing.
+    val providerType = providerRepository.getProvider(providerId)?.type
+    if (providerType != ProviderType.STALKER_PORTAL && providerType != ProviderType.XTREAM_CODES) {
         stopActiveStalkerPlaybackFetchDeferral()
         return
     }
@@ -141,7 +149,11 @@ internal suspend fun PlayerViewModel.synchronizeStalkerPlaybackFetchDeferral(isP
 
     stopActiveStalkerPlaybackFetchDeferral()
     activeStalkerPlaybackProviderId = providerId
-    syncManager.noteStalkerPlaybackStarted(providerId)
+    if (providerType == ProviderType.XTREAM_CODES) {
+        syncManager.noteXtreamPlaybackStarted(providerId)
+    } else {
+        syncManager.noteStalkerPlaybackStarted(providerId)
+    }
 }
 
 fun PlayerViewModel.handOffPlaybackToMultiView() {

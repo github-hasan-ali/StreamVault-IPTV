@@ -830,7 +830,9 @@ class Media3PlayerEngine @Inject constructor(
         lastSupportErrorMessage = null
         _error.tryEmit(null)
         _mediaTitle.value = null
-        trackController.resetSelections()
+        // On a retry of the same stream keep the user's audio/subtitle choice; only a brand-new
+        // stream should fall back to defaults.
+        trackController.resetSelections(preserveUserSelections = preserveRetryState)
         statsCollector.reset()
         videoStallDetector.reset()
         if (!preserveRetryState) {
@@ -1302,7 +1304,7 @@ class Media3PlayerEngine @Inject constructor(
             }
 
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
-                trackController.onTracksChanged(tracks)
+                trackController.onTracksChanged(exoPlayer, tracks)
                 // Detect the silent failure: the stream contains audio groups but no track
                 // is decodable on this device (e.g. EAC3/AC3 without passthrough or a
                 // software decoder). ExoPlayer simply skips the audio renderer without

@@ -176,7 +176,7 @@ class ProviderSyncWorker(
         private const val INVALID_PROVIDER_ID = -1L
 
         fun enqueuePeriodic(context: Context) {
-            val request = PeriodicWorkRequestBuilder<ProviderSyncWorker>(6, TimeUnit.HOURS)
+            val request = PeriodicWorkRequestBuilder<ProviderSyncWorker>(24, TimeUnit.HOURS)
                 .setConstraints(
                     Constraints.Builder()
                         .setRequiredNetworkType(NetworkType.CONNECTED)

@@ -44,6 +44,7 @@ class XtreamIndexWorker(
         }
 
         val force = inputData.getBoolean(KEY_FORCE, false)
+        val userInitiated = inputData.getBoolean(KEY_USER_INITIATED, false)
         val requestedProviderId = inputData.getLong(KEY_PROVIDER_ID, INVALID_PROVIDER_ID)
         val requestedSection = inputData.getString(KEY_SECTION)?.toContentTypeOrNull()
 
@@ -67,7 +68,8 @@ class XtreamIndexWorker(
                         providerId = provider.id,
                         section = requestedSection,
                         force = force,
-                        maxCategoriesPerSection = CATEGORY_SLICE_SIZE
+                        maxCategoriesPerSection = CATEGORY_SLICE_SIZE,
+                        userInitiated = userInitiated
                     )) {
                         is com.streamvault.domain.model.Result.Error -> {
                             Log.w(TAG, "Xtream index worker failed for provider ${provider.id}: ${result.message}")
@@ -100,6 +102,7 @@ class XtreamIndexWorker(
         private const val KEY_PROVIDER_ID = "provider_id"
         private const val KEY_SECTION = "section"
         private const val KEY_FORCE = "force"
+        private const val KEY_USER_INITIATED = "user_initiated"
         private const val INVALID_PROVIDER_ID = -1L
         private const val CATEGORY_SLICE_SIZE = 2
         private const val UNIQUE_WORK_PREFIX = "xtream-index-worker-"
@@ -110,7 +113,8 @@ class XtreamIndexWorker(
             providerId: Long,
             section: String? = null,
             force: Boolean = false,
-            initialDelaySeconds: Long = 0L
+            initialDelaySeconds: Long = 0L,
+            userInitiated: Boolean = false
         ) {
             if (providerId <= 0L) return
             val request = OneTimeWorkRequestBuilder<XtreamIndexWorker>()
@@ -118,6 +122,7 @@ class XtreamIndexWorker(
                     Data.Builder()
                         .putLong(KEY_PROVIDER_ID, providerId)
                         .putBoolean(KEY_FORCE, force)
+                        .putBoolean(KEY_USER_INITIATED, userInitiated)
                         .also { builder ->
                             section?.let { builder.putString(KEY_SECTION, it) }
                         }
@@ -158,7 +163,7 @@ class XtreamIndexWorker(
         }
 
         fun enqueuePeriodic(context: Context) {
-            val request = PeriodicWorkRequestBuilder<XtreamIndexWorker>(6, TimeUnit.HOURS)
+            val request = PeriodicWorkRequestBuilder<XtreamIndexWorker>(24, TimeUnit.HOURS)
                 .setConstraints(defaultConstraints())
                 .setBackoffCriteria(
                     BackoffPolicy.EXPONENTIAL,
