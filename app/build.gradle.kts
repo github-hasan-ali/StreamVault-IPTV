@@ -52,6 +52,7 @@ val officialSigningCertSha256 = computeOfficialSigningCertSha256()
 android {
     namespace = "com.streamvault.app"
     compileSdk = 36
+    buildToolsVersion = "36.1.0"
 
     defaultConfig {
         applicationId = "com.streamvault.app"
